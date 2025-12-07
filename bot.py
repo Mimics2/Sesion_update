@@ -97,6 +97,7 @@ logger.info(f"👑 Final Admin IDs: {ADMIN_IDS}")
 def is_admin(user_id: int) -> bool:
     """Проверка, является ли пользователь админом"""
     result = user_id in ADMIN_IDS
+    logger.info(f"🔍 Checking admin status for {user_id}: {result}")
     return result
 
 class SessionStates(StatesGroup):
@@ -161,7 +162,9 @@ class WhiteListManager:
     
     def is_allowed(self, user_id: int) -> bool:
         """Проверить, есть ли пользователь в белом списке"""
-        return user_id in self.allowed_users
+        result = user_id in self.allowed_users
+        logger.info(f"🔍 Checking whitelist for {user_id}: {result}")
+        return result
     
     def clear_all(self):
         """Очистить весь белый список"""
@@ -175,11 +178,20 @@ class WorkingSessionManager:
         self.user_messages = {}
         self.whitelist = whitelist_manager
     
+    def has_access(self, user_id: int) -> bool:
+        """Проверка доступа пользователя"""
+        is_adm = is_admin(user_id)
+        is_wl = self.whitelist.is_allowed(user_id)
+        has_access = is_adm or is_wl
+        
+        logger.info(f"🔐 Access check for {user_id}: admin={is_adm}, whitelist={is_wl}, access={has_access}")
+        return has_access
+    
     async def create_qr_session(self, user_id: int, message: Message):
         """Создание QR-сессии"""
         try:
-            # Проверяем белый список
-            if not self.whitelist.is_allowed(user_id) and not is_admin(user_id):
+            # Проверяем доступ
+            if not self.has_access(user_id):
                 return False, "❌ Доступ запрещен. Вы не в белом списке."
             
             # Закрываем старую сессию если есть
@@ -225,6 +237,7 @@ class WorkingSessionManager:
                     
                 except Exception as e:
                     last_error = e
+                    logger.error(f"❌ API {config['api_id']} failed: {e}")
                     continue
             
             # Если все конфиги не сработали
@@ -317,7 +330,7 @@ async def cmd_start(message: Message):
     user_id = message.from_user.id
     
     # Проверка доступа
-    if not whitelist_manager.is_allowed(user_id) and not is_admin(user_id):
+    if not manager.has_access(user_id):
         await message.answer(
             "❌ **Доступ запрещен**\n\n"
             "Вы не находитесь в белом списке пользователей.\n"
@@ -327,6 +340,11 @@ async def cmd_start(message: Message):
     
     builder = InlineKeyboardBuilder()
     builder.button(text="📷 Создать сессию через QR-код", callback_data="method_qr")
+    
+    # Кнопка админ панели только для админов
+    if is_admin(user_id):
+        builder.button(text="👑 Админ панель", callback_data="admin_panel")
+    
     builder.adjust(1)
     
     welcome_text = (
@@ -334,30 +352,47 @@ async def cmd_start(message: Message):
         "Создайте сессию для вашего аккаунта через QR-код.\n"
         "После сканирования **сессия придет автоматически**.\n\n"
         "📋 **Команды:**\n"
-        "/start - начать\n"
-        "/qr - создать сессию\n"
+        "/start - показать это меню\n"
         "/check - статус сессии\n"
-        "/help - справка"
+        "/help - справка\n"
+        "/myid - показать мой ID"
     )
-    
-    if is_admin(user_id):
-        welcome_text += "\n\n👑 **Админ команды:**\n/admin - панель админа"
     
     await message.answer(welcome_text, reply_markup=builder.as_markup())
 
 @router.message(Command("qr"))
 async def cmd_qr(message: Message):
-    """Создать сессию через QR"""
+    """Команда /qr - показывает кнопку для создания сессии"""
     user_id = message.from_user.id
     
-    # Проверка белого списка
-    if not is_admin(user_id) and not whitelist_manager.is_allowed(user_id):
+    if not manager.has_access(user_id):
         await message.answer("❌ **Доступ запрещен**\n\nВы не находитесь в белом списке.")
         return
     
-    await message.answer("🔄 Создаем QR-код...")
+    builder = InlineKeyboardBuilder()
+    builder.button(text="📷 Создать сессию через QR-код", callback_data="method_qr")
+    builder.adjust(1)
     
-    success, qr_url = await manager.create_qr_session(user_id, message)
+    await message.answer(
+        "📱 **Создание сессии**\n\n"
+        "Нажмите кнопку ниже для создания QR-кода",
+        reply_markup=builder.as_markup()
+    )
+
+@router.callback_query(F.data == "method_qr")
+async def handle_qr_method(callback: CallbackQuery):
+    """Обработка нажатия кнопки QR"""
+    user_id = callback.from_user.id
+    
+    # Проверка доступа
+    if not manager.has_access(user_id):
+        await callback.answer("❌ Доступ запрещен!", show_alert=True)
+        return
+    
+    await callback.answer()
+    await callback.message.edit_text("🔄 Создаем QR-код...")
+    
+    success, qr_url = await manager.create_qr_session(user_id, callback.message)
     
     if success:
         # Создаем QR-код изображение
@@ -372,7 +407,7 @@ async def cmd_qr(message: Message):
         
         qr_file = BufferedInputFile(bio.getvalue(), filename="qr_code.png")
         
-        await message.answer_photo(
+        await callback.message.answer_photo(
             photo=qr_file,
             caption="📷 **QR-код для подключения:**\n\n"
                    "1. Откройте Telegram → Настройки\n"
@@ -387,19 +422,43 @@ async def cmd_qr(message: Message):
         asyncio.create_task(manager.start_qr_monitoring(user_id))
         
     else:
-        await message.answer(f"❌ {qr_url}")
+        await callback.message.edit_text(f"❌ {qr_url}")
 
-@router.callback_query(F.data == "method_qr")
-async def handle_qr_method(callback: CallbackQuery):
-    await cmd_qr(callback.message)
+@router.callback_query(F.data == "admin_panel")
+async def handle_admin_panel(callback: CallbackQuery):
+    """Обработка нажатия кнопки админ панели"""
+    user_id = callback.from_user.id
+    
+    if not is_admin(user_id):
+        await callback.answer("❌ Нет доступа!", show_alert=True)
+        return
+    
     await callback.answer()
+    
+    admin_text = (
+        f"👑 **Панель администратора**\n\n"
+        f"🆔 **Ваш ID:** `{user_id}`\n"
+        f"📊 **Всего админов:** {len(ADMIN_IDS)}\n\n"
+        f"📋 **Команды:**\n"
+        f"/add_user [ID] - добавить пользователя\n"
+        f"/remove_user [ID] - удалить пользователя\n"
+        f"/list_users - показать всех пользователей\n"
+        f"/clear_users - очистить весь список\n"
+        f"/stats - статистика\n"
+        f"/debug - отладочная информация\n\n"
+        f"Пример:\n"
+        f"`/add_user 123456789`\n"
+        f"`/remove_user 123456789`"
+    )
+    
+    await callback.message.answer(admin_text)
 
 @router.message(Command("check"))
 async def cmd_check(message: Message):
     """Проверка статуса сессии"""
     user_id = message.from_user.id
     
-    if not is_admin(user_id) and not whitelist_manager.is_allowed(user_id):
+    if not manager.has_access(user_id):
         await message.answer("❌ **Доступ запрещен**")
         return
     
@@ -408,25 +467,50 @@ async def cmd_check(message: Message):
         time_passed = datetime.now() - created_time
         await message.answer(f"🔄 Сессия активна\n⏰ Прошло: {int(time_passed.total_seconds())} сек")
     else:
-        await message.answer("❌ Нет активной сессии\n🔄 Используйте /qr")
+        await message.answer("❌ Нет активной сессии\n🔄 Используйте кнопку 'Создать сессию через QR-код'")
 
 @router.message(Command("help"))
 async def cmd_help(message: Message):
     help_text = (
         "🔐 **Помощь по генератору сессий**\n\n"
         "Как использовать:\n"
-        "1. Отправьте /qr\n"
+        "1. Нажмите кнопку 'Создать сессию через QR-код'\n"
         "2. Отсканируйте QR-код в Telegram\n"
         "3. **Обязательно подтвердите вход** в приложении\n"
         "4. **Сессия придет автоматически**\n\n"
         "Команды:\n"
-        "/start - начать\n"
-        "/qr - создать сессию\n"
+        "/start - показать меню\n"
         "/check - проверить статус\n"
-        "/help - эта справка\n\n"
+        "/help - эта справка\n"
+        "/myid - показать мой ID\n\n"
         "⚠️ **Важно:** После сканирования нажмите 'Подключить' в Telegram!"
     )
     await message.answer(help_text)
+
+@router.message(Command("myid"))
+async def cmd_myid(message: Message):
+    """Показать мой ID и статус админа"""
+    user_id = message.from_user.id
+    username = message.from_user.username or "нет username"
+    first_name = message.from_user.first_name or ""
+    last_name = message.from_user.last_name or ""
+    
+    admin_status = is_admin(user_id)
+    whitelist_status = whitelist_manager.is_allowed(user_id)
+    has_access = manager.has_access(user_id)
+    
+    text = (
+        f"👤 **Ваши данные:**\n"
+        f"🆔 **ID:** `{user_id}`\n"
+        f"📛 **Имя:** {first_name} {last_name}\n"
+        f"🔗 **Username:** @{username}\n"
+        f"👑 **Статус админа:** {'✅ ДА' if admin_status else '❌ НЕТ'}\n"
+        f"📋 **В белом списке:** {'✅ ДА' if whitelist_status else '❌ НЕТ'}\n"
+        f"🔐 **Есть доступ к QR:** {'✅ ДА' if has_access else '❌ НЕТ'}\n\n"
+        f"📊 **Admin IDs в системе:** {sorted(list(ADMIN_IDS))}"
+    )
+    
+    await message.answer(text)
 
 # ==============================================
 # АДМИН КОМАНДЫ
@@ -459,29 +543,6 @@ async def cmd_admin(message: Message):
     )
     
     await message.answer(admin_text)
-
-@router.message(Command("myid"))
-async def cmd_myid(message: Message):
-    """Показать мой ID и статус админа"""
-    user_id = message.from_user.id
-    username = message.from_user.username or "нет username"
-    first_name = message.from_user.first_name or ""
-    last_name = message.from_user.last_name or ""
-    
-    admin_status = is_admin(user_id)
-    whitelist_status = whitelist_manager.is_allowed(user_id)
-    
-    text = (
-        f"👤 **Ваши данные:**\n"
-        f"🆔 **ID:** `{user_id}`\n"
-        f"📛 **Имя:** {first_name} {last_name}\n"
-        f"🔗 **Username:** @{username}\n"
-        f"👑 **Статус админа:** {'✅ ДА' if admin_status else '❌ НЕТ'}\n"
-        f"📋 **В белом списке:** {'✅ ДА' if whitelist_status else '❌ НЕТ'}\n\n"
-        f"📊 **Admin IDs в системе:** {sorted(list(ADMIN_IDS))}"
-    )
-    
-    await message.answer(text)
 
 @router.message(Command("add_user"))
 async def cmd_add_user(message: Message):
@@ -634,7 +695,8 @@ async def cmd_debug(message: Message):
     text += f"\n👑 **Admin IDs:** {sorted(list(ADMIN_IDS))}\n"
     text += f"👤 **Your ID:** {user_id}\n"
     text += f"🔍 **Is admin:** {is_admin(user_id)}\n"
-    text += f"📋 **In whitelist:** {whitelist_manager.is_allowed(user_id)}"
+    text += f"📋 **In whitelist:** {whitelist_manager.is_allowed(user_id)}\n"
+    text += f"🔐 **Has access:** {manager.has_access(user_id)}"
     
     await message.answer(text)
 
