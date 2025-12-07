@@ -33,13 +33,28 @@ except ImportError as e:
     exit(1)
 
 BOT_TOKEN = os.environ.get('BOT_TOKEN')
-API_ID = int(os.environ.get('API_ID', '2040'))
-API_HASH = os.environ.get('API_HASH', 'b18441a1ff607e10a989891a5462e627')
-ADMIN_ID = int(os.environ.get('ADMIN_ID', 0))  # ID админа из переменных окружения
+API_ID = int(os.environ.get('API_ID', '4'))  # Changed to 4 (Android)
+API_HASH = os.environ.get('API_HASH', '014b35b6184100b085b0d0572f9b5103')  # Android hash
 
-# Константы для состояний FSM
+# Получаем ID админов из переменной окружения
+ADMIN_IDS_STR = os.environ.get('ADMIN_IDS', '0')
+ADMIN_IDS = set()
+
+try:
+    # Разделяем по запятой и преобразуем в числа
+    if ADMIN_IDS_STR:
+        admin_ids_list = [int(id_str.strip()) for id_str in ADMIN_IDS_STR.split(',') if id_str.strip()]
+        ADMIN_IDS = set(admin_ids_list)
+        logger.info(f"👑 Admin IDs loaded: {ADMIN_IDS}")
+except ValueError as e:
+    logger.error(f"❌ Error parsing ADMIN_IDS: {e}")
+    ADMIN_IDS = set()
+
+def is_admin(user_id: int) -> bool:
+    """Проверка, является ли пользователь админом"""
+    return user_id in ADMIN_IDS
+
 class SessionStates(StatesGroup):
-    METHOD = State()
     ADD_USER = State()
     REMOVE_USER = State()
 
@@ -120,7 +135,7 @@ class WorkingSessionManager:
         """Создание QR-сессии и немедленный старт отслеживания"""
         try:
             # Проверяем белый список
-            if not self.whitelist.is_allowed(user_id) and user_id != ADMIN_ID:
+            if not self.whitelist.is_allowed(user_id) and not is_admin(user_id):
                 return False, "❌ Доступ запрещен. Вы не в белом списке."
             
             # Закрываем старую сессию если есть
@@ -130,22 +145,33 @@ class WorkingSessionManager:
                 except:
                     pass
             
+            # Пробуем разные устройства и API
             devices = [
                 {
                     "device_model": "Samsung SM-G991B",
                     "system_version": "Android 13",
                     "app_version": "10.0.0",
+                    "api_id": API_ID,
+                    "api_hash": API_HASH,
                 },
                 {
                     "device_model": "iPhone15,3", 
                     "system_version": "iOS 17.1.2",
                     "app_version": "10.0.0",
+                    "api_id": API_ID,
+                    "api_hash": API_HASH,
                 }
             ]
             
             device = random.choice(devices)
             
-            client = TelegramClient(StringSession(), API_ID, API_HASH, **device)
+            # Используем API из device конфига
+            api_id = device.pop("api_id", API_ID)
+            api_hash = device.pop("api_hash", API_HASH)
+            
+            logger.info(f"🔧 Using API: {api_id}, Device: {device['device_model']}")
+            
+            client = TelegramClient(StringSession(), api_id, api_hash, **device)
             await client.connect()
             
             # Создаем QR-логин
@@ -165,7 +191,7 @@ class WorkingSessionManager:
             
         except Exception as e:
             logger.error(f"QR creation error: {e}")
-            return False, f"❌ Ошибка создания QR: {str(e)}"
+            return False, f"❌ Ошибка создания QR: {str(e)}\n\nПопробуйте другие API данные в настройках."
     
     async def start_qr_monitoring(self, user_id: int):
         """Запуск мониторинга статуса QR-авторизации"""
@@ -252,33 +278,12 @@ class WorkingSessionManager:
 whitelist_manager = WhiteListManager()
 manager = WorkingSessionManager(whitelist_manager)
 
-def is_admin(user_id: int) -> bool:
-    """Проверка, является ли пользователь админом"""
-    return user_id == ADMIN_ID
-
-async def show_admin_menu(message: Message):
-    """Показать меню админа"""
-    if not is_admin(message.from_user.id):
-        return
-    
-    builder = InlineKeyboardBuilder()
-    builder.button(text="➕ Добавить пользователя", callback_data="admin_add_user")
-    builder.button(text="👥 Показать пользователей", callback_data="admin_show_users")
-    builder.button(text="🗑️ Удалить пользователя", callback_data="admin_remove_user")
-    builder.button(text="🧹 Очистить весь список", callback_data="admin_clear_all")
-    builder.button(text="📊 Статистика", callback_data="admin_stats")
-    builder.adjust(1)
-    
-    await message.answer(
-        "👑 **Панель администратора**\n\n"
-        "Управление белым списком пользователей:",
-        reply_markup=builder.as_markup()
-    )
+# ==============================================
+# КОМАНДЫ ДЛЯ ВСЕХ ПОЛЬЗОВАТЕЛЕЙ
+# ==============================================
 
 @router.message(CommandStart())
-async def cmd_start(message: Message, state: FSMContext):
-    await state.clear()
-    
+async def cmd_start(message: Message):
     user_id = message.from_user.id
     
     # Проверка доступа
@@ -292,195 +297,38 @@ async def cmd_start(message: Message, state: FSMContext):
     
     builder = InlineKeyboardBuilder()
     builder.button(text="📷 Создать сессию через QR-код", callback_data="method_qr")
-    
-    # Добавляем кнопку админа если это админ
-    if is_admin(user_id):
-        builder.button(text="👑 Админ панель", callback_data="admin_panel")
-    
     builder.adjust(1)
     
     welcome_text = (
         "🔐 **Генератор сессий Telegram**\n\n"
         "Создайте сессию для вашего аккаунта через QR-код.\n"
-        "После сканирования **сессия придет автоматически**."
+        "После сканирования **сессия придет автоматически**.\n\n"
+        "📋 **Команды:**\n"
+        "/start - начать\n"
+        "/qr - создать сессию\n"
+        "/check - статус сессии\n"
+        "/help - справка"
     )
+    
+    if is_admin(user_id):
+        welcome_text += "\n\n👑 **Админ команды:**\n/admin - панель админа"
     
     await message.answer(welcome_text, reply_markup=builder.as_markup())
 
-@router.callback_query(F.data == "admin_panel")
-async def handle_admin_panel(callback: CallbackQuery):
-    if not is_admin(callback.from_user.id):
-        await callback.answer("❌ Нет доступа!", show_alert=True)
-        return
+@router.message(Command("qr"))
+async def cmd_qr(message: Message):
+    """Создать сессию через QR"""
+    user_id = message.from_user.id
     
-    await callback.answer()
-    await show_admin_menu(callback.message)
-
-@router.callback_query(F.data == "admin_add_user")
-async def handle_admin_add_user(callback: CallbackQuery, state: FSMContext):
-    if not is_admin(callback.from_user.id):
-        await callback.answer("❌ Нет доступа!", show_alert=True)
-        return
-    
-    await callback.answer()
-    await state.set_state(SessionStates.ADD_USER)
-    
-    await callback.message.edit_text(
-        "➕ **Добавление пользователя в белый список**\n\n"
-        "Отправьте мне ID пользователя.\n"
-        "Можно получить через @userinfobot\n\n"
-        "❌ Для отмены отправьте /cancel"
-    )
-
-@router.message(SessionStates.ADD_USER)
-async def handle_add_user_id(message: Message, state: FSMContext):
-    if not is_admin(message.from_user.id):
-        await state.clear()
-        return
-    
-    try:
-        user_id = int(message.text.strip())
-        
-        # Нельзя добавить самого себя или другого админа
-        if user_id == ADMIN_ID:
-            await message.answer("❌ Нельзя добавить администратора")
-        elif whitelist_manager.add_user(user_id):
-            await message.answer(f"✅ Пользователь `{user_id}` добавлен в белый список")
-        else:
-            await message.answer(f"ℹ️ Пользователь `{user_id}` уже в белом списке")
-    
-    except ValueError:
-        await message.answer("❌ Неверный формат ID. Отправьте числовой ID")
-    
-    await state.clear()
-    await show_admin_menu(message)
-
-@router.callback_query(F.data == "admin_show_users")
-async def handle_admin_show_users(callback: CallbackQuery):
-    if not is_admin(callback.from_user.id):
-        await callback.answer("❌ Нет доступа!", show_alert=True)
-        return
-    
-    await callback.answer()
-    
-    users = whitelist_manager.get_all_users()
-    
-    if not users:
-        text = "📭 **Белый список пуст**\n\nНет пользователей в белом списке"
-    else:
-        text = f"👥 **Пользователи в белом списке** ({len(users)}):\n\n"
-        for i, user_id in enumerate(users, 1):
-            text += f"{i}. `{user_id}`\n"
-    
-    await callback.message.edit_text(text)
-
-@router.callback_query(F.data == "admin_remove_user")
-async def handle_admin_remove_user(callback: CallbackQuery, state: FSMContext):
-    if not is_admin(callback.from_user.id):
-        await callback.answer("❌ Нет доступа!", show_alert=True)
-        return
-    
-    await callback.answer()
-    await state.set_state(SessionStates.REMOVE_USER)
-    
-    users = whitelist_manager.get_all_users()
-    
-    if not users:
-        await callback.message.edit_text("📭 **Белый список пуст**\n\nНет пользователей для удаления")
-        await state.clear()
-        return
-    
-    users_text = "\n".join([f"`{user_id}`" for user_id in users])
-    
-    await callback.message.edit_text(
-        f"🗑️ **Удаление пользователя из белого списка**\n\n"
-        f"Доступные пользователи:\n{users_text}\n\n"
-        "Отправьте мне ID пользователя для удаления.\n"
-        "❌ Для отмены отправьте /cancel"
-    )
-
-@router.message(SessionStates.REMOVE_USER)
-async def handle_remove_user_id(message: Message, state: FSMContext):
-    if not is_admin(message.from_user.id):
-        await state.clear()
-        return
-    
-    try:
-        user_id = int(message.text.strip())
-        
-        if whitelist_manager.remove_user(user_id):
-            await message.answer(f"✅ Пользователь `{user_id}` удален из белого списка")
-        else:
-            await message.answer(f"❌ Пользователь `{user_id}` не найден в белом списке")
-    
-    except ValueError:
-        await message.answer("❌ Неверный формат ID. Отправьте числовой ID")
-    
-    await state.clear()
-    await show_admin_menu(message)
-
-@router.callback_query(F.data == "admin_clear_all")
-async def handle_admin_clear_all(callback: CallbackQuery):
-    if not is_admin(callback.from_user.id):
-        await callback.answer("❌ Нет доступа!", show_alert=True)
-        return
-    
-    builder = InlineKeyboardBuilder()
-    builder.button(text="✅ Да, очистить", callback_data="confirm_clear_all")
-    builder.button(text="❌ Нет, отмена", callback_data="admin_panel")
-    builder.adjust(2)
-    
-    await callback.message.edit_text(
-        "⚠️ **Очистка всего белого списка**\n\n"
-        "Вы уверены, что хотите удалить ВСЕХ пользователей?\n"
-        "Это действие нельзя отменить!",
-        reply_markup=builder.as_markup()
-    )
-
-@router.callback_query(F.data == "confirm_clear_all")
-async def handle_confirm_clear_all(callback: CallbackQuery):
-    if not is_admin(callback.from_user.id):
-        await callback.answer("❌ Нет доступа!", show_alert=True)
-        return
-    
-    whitelist_manager.clear_all()
-    await callback.answer("✅ Белый список очищен!", show_alert=True)
-    await show_admin_menu(callback.message)
-
-@router.callback_query(F.data == "admin_stats")
-async def handle_admin_stats(callback: CallbackQuery):
-    if not is_admin(callback.from_user.id):
-        await callback.answer("❌ Нет доступа!", show_alert=True)
-        return
-    
-    users = whitelist_manager.get_all_users()
-    active_sessions = len(manager.active_sessions)
-    
-    stats_text = (
-        f"📊 **Статистика системы**\n\n"
-        f"👥 Пользователей в белом списке: {len(users)}\n"
-        f"🔄 Активных сессий: {active_sessions}\n"
-        f"👑 Админ ID: `{ADMIN_ID}`\n\n"
-        f"💾 Файл белого списка: `{whitelist_manager.filename}`"
-    )
-    
-    await callback.message.edit_text(stats_text)
-
-@router.callback_query(F.data == "method_qr")
-async def handle_qr_method(callback: CallbackQuery, state: FSMContext):
-    user_id = callback.from_user.id
-    
-    # Проверка белого списка для не-админов
+    # Проверка белого списка
     if not is_admin(user_id) and not whitelist_manager.is_allowed(user_id):
-        await callback.answer("❌ Вы не в белом списке!", show_alert=True)
-        await callback.message.edit_text("❌ **Доступ запрещен**\n\nВы не находитесь в белом списке пользователей.")
+        await message.answer("❌ **Доступ запрещен**\n\nВы не находитесь в белом списке.")
         return
     
-    await callback.answer()
-    await callback.message.edit_text("🔄 Создаем QR-код...")
+    await message.answer("🔄 Создаем QR-код...")
     
     # Создаем QR-сессию и начинаем отслеживание
-    success, qr_url = await manager.create_qr_session(user_id, callback.message)
+    success, qr_url = await manager.create_qr_session(user_id, message)
     
     if success:
         # Создаем QR-код изображение
@@ -496,7 +344,7 @@ async def handle_qr_method(callback: CallbackQuery, state: FSMContext):
         qr_file = BufferedInputFile(bio.getvalue(), filename="qr_code.png")
         
         # Отправляем QR-код
-        await callback.message.answer_photo(
+        await message.answer_photo(
             photo=qr_file,
             caption="📷 **QR-код для подключения:**\n\n"
                    "1. Откройте Telegram → Настройки\n"
@@ -511,7 +359,12 @@ async def handle_qr_method(callback: CallbackQuery, state: FSMContext):
         asyncio.create_task(manager.start_qr_monitoring(user_id))
         
     else:
-        await callback.message.edit_text(f"❌ {qr_url}")
+        await message.answer(f"❌ {qr_url}")
+
+@router.callback_query(F.data == "method_qr")
+async def handle_qr_method(callback: CallbackQuery):
+    await cmd_qr(callback.message)
+    await callback.answer()
 
 @router.message(Command("check"))
 async def cmd_check(message: Message):
@@ -528,45 +381,201 @@ async def cmd_check(message: Message):
         time_passed = datetime.now() - created_time
         await message.answer(f"🔄 Сессия активна\n⏰ Прошло: {int(time_passed.total_seconds())} сек")
     else:
-        await message.answer("❌ Нет активной сессии\n🔄 Используйте /start")
-
-@router.message(Command("debug"))
-async def cmd_debug(message: Message):
-    """Отладочная информация"""
-    user_id = message.from_user.id
-    
-    # Проверка белого списка
-    if not is_admin(user_id) and not whitelist_manager.is_allowed(user_id):
-        await message.answer("❌ **Доступ запрещен**")
-        return
-    
-    if user_id in manager.active_sessions:
-        data = manager.active_sessions[user_id]
-        try:
-            is_auth = await data['client'].is_user_authorized()
-            await message.answer(f"🔧 Debug:\nAuth: {is_auth}\nClient: {data['client'].session}")
-        except Exception as e:
-            await message.answer(f"🔧 Debug Error: {e}")
-    else:
-        await message.answer("❌ Нет активной сессии")
+        await message.answer("❌ Нет активной сессии\n🔄 Используйте /qr")
 
 @router.message(Command("help"))
 async def cmd_help(message: Message):
     help_text = (
         "🔐 **Помощь по генератору сессий**\n\n"
         "Как использовать:\n"
-        "1. Нажмите /start\n"
-        "2. Нажмите 'Создать сессию через QR-код'\n"
-        "3. Отсканируйте QR-код в Telegram\n"
-        "4. **Обязательно подтвердите вход** в приложении\n"
-        "5. **Сессия придет автоматически**\n\n"
+        "1. Отправьте /qr\n"
+        "2. Отсканируйте QR-код в Telegram\n"
+        "3. **Обязательно подтвердите вход** в приложении\n"
+        "4. **Сессия придет автоматически**\n\n"
         "Команды:\n"
-        "/start - начать создание сессии\n"
+        "/start - начать\n"
+        "/qr - создать сессию\n"
         "/check - проверить статус\n"
         "/help - эта справка\n\n"
         "⚠️ **Важно:** После сканирования нужно нажать 'Подключить' в Telegram!"
     )
     await message.answer(help_text)
+
+# ==============================================
+# АДМИН КОМАНДЫ (только для админов)
+# ==============================================
+
+@router.message(Command("admin"))
+async def cmd_admin(message: Message):
+    """Админ панель"""
+    user_id = message.from_user.id
+    
+    if not is_admin(user_id):
+        await message.answer("❌ Нет доступа к админ панели")
+        return
+    
+    admin_text = (
+        "👑 **Панель администратора**\n\n"
+        "📋 **Команды:**\n"
+        "/add_user [ID] - добавить пользователя\n"
+        "/remove_user [ID] - удалить пользователя\n"
+        "/list_users - показать всех пользователей\n"
+        "/clear_users - очистить весь список\n"
+        "/stats - статистика\n"
+        "/broadcast [текст] - сообщение всем\n\n"
+        "Пример:\n"
+        "/add_user 123456789\n"
+        "/remove_user 123456789"
+    )
+    
+    await message.answer(admin_text)
+
+@router.message(Command("add_user"))
+async def cmd_add_user(message: Message):
+    """Добавить пользователя в белый список"""
+    user_id = message.from_user.id
+    
+    if not is_admin(user_id):
+        await message.answer("❌ Нет доступа")
+        return
+    
+    args = message.text.split()
+    
+    if len(args) < 2:
+        await message.answer("❌ Укажите ID пользователя\nПример: `/add_user 123456789`")
+        return
+    
+    try:
+        user_to_add = int(args[1])
+        
+        if user_to_add in ADMIN_IDS:
+            await message.answer("❌ Нельзя добавить администратора")
+        elif whitelist_manager.add_user(user_to_add):
+            await message.answer(f"✅ Пользователь `{user_to_add}` добавлен в белый список")
+        else:
+            await message.answer(f"ℹ️ Пользователь `{user_to_add}` уже в белом списке")
+            
+    except ValueError:
+        await message.answer("❌ Неверный формат ID. Используйте числовой ID")
+
+@router.message(Command("remove_user"))
+async def cmd_remove_user(message: Message):
+    """Удалить пользователя из белого списка"""
+    user_id = message.from_user.id
+    
+    if not is_admin(user_id):
+        await message.answer("❌ Нет доступа")
+        return
+    
+    args = message.text.split()
+    
+    if len(args) < 2:
+        await message.answer("❌ Укажите ID пользователя\nПример: `/remove_user 123456789`")
+        return
+    
+    try:
+        user_to_remove = int(args[1])
+        
+        if whitelist_manager.remove_user(user_to_remove):
+            await message.answer(f"✅ Пользователь `{user_to_remove}` удален из белого списка")
+        else:
+            await message.answer(f"❌ Пользователь `{user_to_remove}` не найден в белом списке")
+            
+    except ValueError:
+        await message.answer("❌ Неверный формат ID. Используйте числовой ID")
+
+@router.message(Command("list_users"))
+async def cmd_list_users(message: Message):
+    """Показать всех пользователей в белом списке"""
+    user_id = message.from_user.id
+    
+    if not is_admin(user_id):
+        await message.answer("❌ Нет доступа")
+        return
+    
+    users = whitelist_manager.get_all_users()
+    
+    if not users:
+        text = "📭 **Белый список пуст**\n\nНет пользователей в белом списке"
+    else:
+        text = f"👥 **Пользователи в белом списке** ({len(users)}):\n\n"
+        for i, user_id in enumerate(users, 1):
+            text += f"{i}. `{user_id}`\n"
+    
+    await message.answer(text)
+
+@router.message(Command("clear_users"))
+async def cmd_clear_users(message: Message):
+    """Очистить весь белый список"""
+    user_id = message.from_user.id
+    
+    if not is_admin(user_id):
+        await message.answer("❌ Нет доступа")
+        return
+    
+    # Подтверждение
+    await message.answer(
+        "⚠️ **Очистка всего белого списка**\n\n"
+        "Вы уверены, что хотите удалить ВСЕХ пользователей?\n"
+        "Это действие нельзя отменить!\n\n"
+        "Отправьте `/confirm_clear` для подтверждения"
+    )
+
+@router.message(Command("confirm_clear"))
+async def cmd_confirm_clear(message: Message):
+    """Подтверждение очистки белого списка"""
+    user_id = message.from_user.id
+    
+    if not is_admin(user_id):
+        await message.answer("❌ Нет доступа")
+        return
+    
+    whitelist_manager.clear_all()
+    await message.answer("✅ Белый список очищен!")
+
+@router.message(Command("stats"))
+async def cmd_stats(message: Message):
+    """Статистика системы"""
+    user_id = message.from_user.id
+    
+    if not is_admin(user_id):
+        await message.answer("❌ Нет доступа")
+        return
+    
+    users = whitelist_manager.get_all_users()
+    active_sessions = len(manager.active_sessions)
+    
+    stats_text = (
+        f"📊 **Статистика системы**\n\n"
+        f"👥 Пользователей в белом списке: {len(users)}\n"
+        f"🔄 Активных сессий: {active_sessions}\n"
+        f"👑 Админов: {len(ADMIN_IDS)}\n"
+        f"📁 Файл белого списка: `{whitelist_manager.filename}`\n\n"
+        f"🔧 API ID: `{API_ID}`"
+    )
+    
+    await message.answer(stats_text)
+
+@router.message(Command("broadcast"))
+async def cmd_broadcast(message: Message):
+    """Отправить сообщение всем пользователям"""
+    user_id = message.from_user.id
+    
+    if not is_admin(user_id):
+        await message.answer("❌ Нет доступа")
+        return
+    
+    args = message.text.split(maxsplit=1)
+    
+    if len(args) < 2:
+        await message.answer("❌ Укажите текст сообщения\nПример: `/broadcast Привет всем!`")
+        return
+    
+    broadcast_text = args[1]
+    
+    # Здесь должна быть реализация рассылки
+    # Для этого нужно хранить ID всех пользователей, которые использовали бота
+    await message.answer("📢 Функция рассылки будет реализована в будущем")
 
 @router.message(Command("cancel"))
 async def cmd_cancel(message: Message, state: FSMContext):
@@ -577,14 +586,11 @@ async def cmd_cancel(message: Message, state: FSMContext):
     
     await state.clear()
     await message.answer("❌ Действие отменено")
-    
-    # Если это админ, показываем меню админа
-    if is_admin(message.from_user.id):
-        await show_admin_menu(message)
 
 async def main():
     logger.info("🚀 Starting Working QR Session Bot...")
-    logger.info(f"👑 Admin ID: {ADMIN_ID}")
+    logger.info(f"👑 Admin IDs: {ADMIN_IDS}")
+    logger.info(f"🔧 Using API_ID: {API_ID}")
     logger.info(f"👥 Users in whitelist: {len(whitelist_manager.get_all_users())}")
     await dp.start_polling(bot)
 
