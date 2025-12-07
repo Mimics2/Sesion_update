@@ -1,0 +1,5 @@
+aiogram==3.10.0
+telethon==1.28.5
+qrcode[pil]==7.4.2
+Pillow==10.0.1
+pyaes==1.6.1
